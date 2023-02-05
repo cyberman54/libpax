@@ -35,26 +35,56 @@ Which in turn is based of Łukasz Marcin Podkalicki's ESP32/016 WiFi Sniffer
 #include "libpax.h"
 #include "wifiscan.h"
 
+#ifndef TAG
+#define TAG __FILE__
+#endif
+
 TimerHandle_t WifiChanTimer;
 int initialized_wifi = 0;
 int wifi_rssi_threshold = 0;
 uint16_t channels_map = WIFI_CHANNEL_ALL;
 static wifi_country_t country;
+static QueueHandle_t pkt_queue;
+static TaskHandle_t pkt_processor;
+
+void pkt_process(void* pvParameters) {
+  wifi_promiscuous_pkt_t* pkt_data =
+      (wifi_promiscuous_pkt_t*)malloc(sizeof(wifi_promiscuous_pkt_t));
+  if (pkt_data == NULL) {
+    ESP_LOGE(TAG, "Malloc pkt_data failed");
+    return;
+  }
+
+  wifi_promiscuous_pkt_t* ppkt;
+  wifi_ieee80211_packet_t* ipkt;
+  wifi_ieee80211_mac_hdr_t* hdr;
+
+  while (1) {
+    if (xQueueReceive(pkt_queue, pkt_data, portMAX_DELAY) != pdPASS) {
+      ESP_LOGE(TAG, "Queue receive error");
+    } else {
+      ppkt = (wifi_promiscuous_pkt_t*)pkt_data;
+      ipkt = (wifi_ieee80211_packet_t*)ppkt->payload;
+      hdr = &ipkt->hdr;
+
+      if ((wifi_rssi_threshold) &&
+          (ppkt->rx_ctrl.rssi < wifi_rssi_threshold))  // rssi is negative value
+        return;
+      else
+        mac_add((uint8_t*)hdr->addr2, MAC_SNIFF_WIFI);
+    }
+  }
+  // memset(pkt_data, 0, sizeof(wifi_promiscuous_pkt_t));
+}
 
 void wifi_noop_sniffer(void* buff, wifi_promiscuous_pkt_type_t type) {}
 
 // using IRAM_ATTR here to speed up callback function
 static IRAM_ATTR void wifi_sniffer_packet_handler(
     void* buff, wifi_promiscuous_pkt_type_t type) {
-  const wifi_promiscuous_pkt_t* ppkt = (wifi_promiscuous_pkt_t*)buff;
-  const wifi_ieee80211_packet_t* ipkt = (wifi_ieee80211_packet_t*)ppkt->payload;
-  const wifi_ieee80211_mac_hdr_t* hdr = &ipkt->hdr;
-
-  if ((wifi_rssi_threshold) &&
-      (ppkt->rx_ctrl.rssi < wifi_rssi_threshold))  // rssi is negative value
-    return;
-  else
-    mac_add((uint8_t*)hdr->addr2, MAC_SNIFF_WIFI);
+  if (xQueueSend(pkt_queue, (void*)&buff, (TickType_t)0) != pdTRUE) {
+    ESP_LOGD(TAG, "Failed to enqueue wifi packet report. Queue full.");
+  }
 }
 
 // Software-timer driven Wifi channel rotation callback function
@@ -91,20 +121,37 @@ void set_wifi_rssi_filter(int set_rssi_threshold) {
 void wifi_sniffer_init(uint16_t wifi_channel_switch_interval) {
 #ifdef LIBPAX_WIFI
   wifi_init_config_t wificfg = WIFI_INIT_CONFIG_DEFAULT();
-  wificfg.nvs_enable = 0;         // we don't need any wifi settings from NVRAM
-  wificfg.wifi_task_core_id = 0;  // we want wifi task running on core 0
+  wificfg.nvs_enable = 0;          // we don't need any wifi settings from NVRAM
+  wificfg.wifi_task_core_id = 0;   // we want wifi task running on core 0
+  wificfg.static_rx_buf_num = 16;  // increase RX buffer to minimize packet loss
+  wificfg.dynamic_rx_buf_num = 64;
+  wificfg.rx_ba_win = 32;   // should be twice of static_rx_buf_num
+  wificfg.tx_buf_type = 1;  // we don't TX, thus keep tx memory footprint small
+  wificfg.static_tx_buf_num = 0;
+  wificfg.dynamic_tx_buf_num = 4;
+  wificfg.cache_tx_buf_num = 4;  // can't be zero!
 
   // filter management and data frames to the sniffer
   wifi_promiscuous_filter_t filter = {.filter_mask =
                                           WIFI_PROMIS_FILTER_MASK_MGMT |
                                           WIFI_PROMIS_FILTER_MASK_DATA};
 
+  // setup queue for storing received packets
+  pkt_queue = xQueueCreate(30, sizeof(wifi_promiscuous_pkt_t));
+  if (pkt_queue == NULL) {
+    ESP_LOGE(TAG, "Queue creation failed");
+    return;
+  }
+
+  // start wifi packet processor task with prio 1 on core 0 */
+  xTaskCreatePinnedToCore(&pkt_process, "pkt_process", 2048, NULL, 1,
+                          &pkt_processor, 0);
+
   ESP_ERROR_CHECK(esp_wifi_init(&wificfg));  // configure Wifi with cfg
   ESP_ERROR_CHECK(
       esp_wifi_set_promiscuous_filter(&filter));  // enable frame filtering
   ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_packet_handler));
-  ESP_ERROR_CHECK(
-      esp_wifi_set_promiscuous(true));  // start sniffer mode
+  ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));  // start sniffer mode
 
   // setup wifi channel rotation timer
   if (wifi_channel_switch_interval > 0) {
