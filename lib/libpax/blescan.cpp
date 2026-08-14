@@ -128,8 +128,14 @@ static void hci_cmd_send_ble_scan_params(void) {
 }
 
 static void hci_cmd_send_ble_scan_start(void) {
-  uint8_t scan_enable = 0x01;       /* Scanning enabled. */
-  uint8_t filter_duplicates = 0x00; /* Duplicate filtering disabled. */
+  uint8_t scan_enable = 0x01; /* Scanning enabled. */
+  // Controller-side duplicate filtering is safe here: we only need to know
+  // a MAC was seen at all, which mac_add()/weigh_buckets() already dedupe
+  // in software; this just cuts HCI event volume. Requires
+  // CONFIG_BTDM_SCAN_DUPL_CACHE_REFRESH_PERIOD (sdkconfig) to be <= the
+  // configured pax_report_interval_sec, so devices still present get
+  // re-reported at least once per counting interval.
+  uint8_t filter_duplicates = 0x01;
   uint16_t sz =
       make_cmd_ble_set_scan_enable(hci_cmd_buf, scan_enable, filter_duplicates);
   esp_vhci_host_send_packet(hci_cmd_buf, sz);
@@ -265,9 +271,12 @@ void start_BLE_scan(uint16_t blescantime, uint16_t blescanwindow,
       return;
     }
 
-    /* start HCI event processor task with prio 1 */
-    xTaskCreate(&hci_evt_process, "hci_evt_process", 2048, NULL, 1,
-                &hci_eventprocessor);
+    // Pinned to core 1: the WiFi task and BT controller are both pinned to
+    // core 0, so keeping HCI event processing off core 0 avoids contention.
+    // Priority raised from 1 (barely above idle) so bursts of advertising
+    // reports get drained before the queue fills up and reports are dropped.
+    xTaskCreatePinnedToCore(&hci_evt_process, "hci_evt_process", 2048, NULL, 5,
+                            &hci_eventprocessor, 1);
 
     esp_vhci_host_register_callback(&vhci_host_cb);
 
