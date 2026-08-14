@@ -45,7 +45,9 @@ void libpax_counter_reset() {
 // add_to_bucket() in libpax.cpp). Periodically "weighs" the bitmaps -
 // atomically grabbing each 32 bit word and popcounting it - to publish
 // macs_wifi/macs_ble, then invokes the user callback.
-IRAM_ATTR static void report_task(void* /* pvParameters, unused */) {
+// Not a hot path (not called from ISR context); kept out of IRAM to leave
+// room for the packet handlers.
+static void report_task(void* /* pvParameters, unused */) {
   TickType_t last_wake_time = xTaskGetTickCount();
   for (;;) {
     vTaskDelayUntil(&last_wake_time, report_interval_ticks);
@@ -108,7 +110,7 @@ void libpax_default_config(struct libpax_config_t* configuration) {
          sizeof(default_country) > 3 ? 3 : sizeof(default_country));
   
   configuration->wifi_channel_map =
-      WIFI_CHANNEL_3 | WIFI_CHANNEL_6 | WIFI_CHANNEL_9 | WIFI_CHANNEL_11;
+      LIBPAX_WIFI_CHANNEL_3 | LIBPAX_WIFI_CHANNEL_6 | LIBPAX_WIFI_CHANNEL_9 | LIBPAX_WIFI_CHANNEL_11;
   configuration->wifi_channel_switch_interval = 50;
   configuration->wifi_rssi_threshold = 0;
   configuration->ble_rssi_threshold = 0;
