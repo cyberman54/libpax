@@ -17,6 +17,9 @@ void test_mac_add_bytes() {
   test_mac_addr[4] = 0x02;
   test_mac_addr[5] = 0x01;
   mac_add(test_mac_addr, MAC_SNIFF_WIFI);
+  // counting happens asynchronously now: weigh the bitmap on demand to
+  // get an up to date count for the assertion below
+  weigh_buckets(/* peek= */ false);
   TEST_ASSERT_EQUAL(2, libpax_wifi_counter_count());
 
   libpax_counter_reset();
@@ -27,6 +30,7 @@ void test_mac_add_bytes() {
   test_mac_addr[4] = 0x01;
   test_mac_addr[5] = 0x02;
   mac_add(test_mac_addr, MAC_SNIFF_WIFI);
+  weigh_buckets(/* peek= */ false);
   TEST_ASSERT_EQUAL(2, libpax_wifi_counter_count());
 }
 
@@ -44,8 +48,12 @@ void test_collision_add() {
   uint16_t *test_mac_addr_p = (uint16_t *)(test_mac_addr + 4);
   *test_mac_addr_p = 1;
   for (int i = 0; i < 1000; i++) {
+    // peek (don't clear) so the bitmap keeps accumulating across the
+    // whole loop, matching the previous synchronous per-call counting
+    weigh_buckets(/* peek= */ true);
     int count_start = libpax_wifi_counter_count();
     mac_add(test_mac_addr, MAC_SNIFF_WIFI);
+    weigh_buckets(/* peek= */ true);
     TEST_ASSERT_EQUAL(1, libpax_wifi_counter_count() - count_start);
     *test_mac_addr_p += 1;
   }
@@ -53,8 +61,10 @@ void test_collision_add() {
   ESP_LOGI("testing", "Collision tests starts ###");
   *test_mac_addr_p = 1;
   for (int i = 0; i < 1000; i++) {
+    weigh_buckets(/* peek= */ true);
     int count_start = libpax_wifi_counter_count();
     mac_add(test_mac_addr, MAC_SNIFF_WIFI);
+    weigh_buckets(/* peek= */ true);
     TEST_ASSERT_EQUAL(libpax_wifi_counter_count(), count_start);
     *test_mac_addr_p += 1;
   }
@@ -70,6 +80,7 @@ void test_counter_reset() {
 
   uint8_t test_mac_addr[6] = {0x0b, 0x01, 1, 1, 1, 1};
   mac_add(test_mac_addr, MAC_SNIFF_WIFI);
+  weigh_buckets(/* peek= */ false);
   TEST_ASSERT_EQUAL(1, libpax_wifi_counter_count());
 
   libpax_counter_reset();

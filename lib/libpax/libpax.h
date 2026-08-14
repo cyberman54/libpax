@@ -35,6 +35,10 @@ int libpax_wifi_counter_count();
 int libpax_ble_counter_count();
 void libpax_counter_reset();
 void reset_bucket();
+// Weighs both seen-id bitmaps into macs_wifi/macs_ble. When peek is false
+// (periodic counter_mode) each bitmap is cleared as it is weighed; when
+// peek is true (cumulative counter_mode) the bitmaps are left untouched.
+void weigh_buckets(bool peek);
 int mac_add(uint8_t *paddr, snifftype_t sniff_type);
 
 #endif
