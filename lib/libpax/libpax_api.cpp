@@ -27,6 +27,7 @@ volatile int config_set = 0;  // volatile since accessed from ISR context
 void (*report_callback)(void);
 struct count_payload_t* pCurrent_count;
 int counter_mode;
+static TickType_t report_interval_ticks;
 
 // Inline fast counter read
 static inline void fill_counter(struct count_payload_t* pCount) {
@@ -39,14 +40,21 @@ void libpax_counter_reset() {
   reset_bucket();
 }
 
-// Optimized timer callback with minimal overhead
-IRAM_ATTR void report(TimerHandle_t /* xTimer, required by TimerCallbackFunction_t signature */) {
-  fill_counter(pCurrent_count);
-  report_callback();
-  
-  // clear counter if not in cumulative counter mode
-  if (counter_mode != 1) {
-    libpax_counter_reset();
+// Report task: runs on its own core, decoupled from the WiFi/BLE RX task
+// which only ever sets bits in the seen_ids maps (see mac_add()/
+// add_to_bucket() in libpax.cpp). Periodically "weighs" the bitmaps -
+// atomically grabbing each 32 bit word and popcounting it - to publish
+// macs_wifi/macs_ble, then invokes the user callback.
+IRAM_ATTR static void report_task(void* /* pvParameters, unused */) {
+  TickType_t last_wake_time = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last_wake_time, report_interval_ticks);
+
+    // peek (don't clear) the bitmaps in cumulative counter mode so
+    // counting keeps accumulating across report intervals
+    weigh_buckets(counter_mode == 1);
+    fill_counter(pCurrent_count);
+    report_callback();
   }
 }
 
@@ -145,12 +153,12 @@ int libpax_update_config(struct libpax_config_t* configuration) {
   return result;
 }
 
-TimerHandle_t PaxReportTimer = NULL;
+TaskHandle_t ReportTaskHandle = NULL;
 int libpax_counter_init(void (*init_callback)(void),
                         struct count_payload_t* init_current_count,
                         uint16_t init_pax_report_interval_sec,
                         int init_counter_mode) {
-  if (PaxReportTimer != NULL && xTimerIsTimerActive(PaxReportTimer)) {
+  if (ReportTaskHandle != NULL) {
     ESP_LOGW("libpax", "lib already active. Ignoring new init.");
     return -1;
   }
@@ -158,13 +166,23 @@ int libpax_counter_init(void (*init_callback)(void),
   report_callback = init_callback;
   pCurrent_count = init_current_count;
   counter_mode = init_counter_mode;
+  report_interval_ticks =
+      pdMS_TO_TICKS((uint32_t)init_pax_report_interval_sec * 1000);
 
   libpax_counter_reset();
 
-  PaxReportTimer = xTimerCreate(
-      "PaxReportTimer", (init_pax_report_interval_sec * 1000) / portTICK_PERIOD_MS,
-      pdTRUE, (void*)0, report);
-  xTimerStart(PaxReportTimer, 0);
+  // Pin the weigher/report task to the core opposite the WiFi/BLE RX
+  // path (typically PRO_CPU) so collecting (bit-set) and weighing
+  // (popcount) genuinely run in parallel; on single-core targets there
+  // is no "other" core, so fall back to no affinity.
+#if (portNUM_PROCESSORS > 1)
+  BaseType_t report_task_core = APP_CPU_NUM;
+#else
+  BaseType_t report_task_core = tskNO_AFFINITY;
+#endif
+  xTaskCreatePinnedToCore(report_task, "PaxReportTask", 4096, NULL,
+                          tskIDLE_PRIORITY + 1, &ReportTaskHandle,
+                          report_task_core);
   return 0;
 }
 
@@ -203,15 +221,15 @@ int libpax_counter_start() {
 }
 
 int libpax_counter_stop() {
-  if (PaxReportTimer == NULL) {
+  if (ReportTaskHandle == NULL) {
     ESP_LOGI("libpax", "libpax requested to stop, but not running.");
     return -1;
   }
   ESP_LOGI("libpax", "Stopping libpax.");
   wifi_sniffer_stop();
   stop_BLE_scan();
-  xTimerStop(PaxReportTimer, 0);
-  PaxReportTimer = NULL;
+  vTaskDelete(ReportTaskHandle);
+  ReportTaskHandle = NULL;
 
   libpax_state = LIBPAX_STOPPED;
   return 0;
