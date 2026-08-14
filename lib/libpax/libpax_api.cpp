@@ -180,9 +180,14 @@ int libpax_counter_init(void (*init_callback)(void),
 #else
   BaseType_t report_task_core = tskNO_AFFINITY;
 #endif
-  xTaskCreatePinnedToCore(report_task, "PaxReportTask", 4096, NULL,
-                          tskIDLE_PRIORITY + 1, &ReportTaskHandle,
-                          report_task_core);
+  BaseType_t created = xTaskCreatePinnedToCore(
+      report_task, "PaxReportTask", 4096, NULL, tskIDLE_PRIORITY + 1,
+      &ReportTaskHandle, report_task_core);
+  if (created != pdPASS) {
+    ESP_LOGE("libpax", "Failed to create PaxReportTask.");
+    ReportTaskHandle = NULL;
+    return -1;
+  }
   return 0;
 }
 

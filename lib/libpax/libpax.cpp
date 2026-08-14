@@ -90,7 +90,9 @@ static inline uint16_t weigh_map(bitmap_t *map, size_t words, bool peek) {
                          : __atomic_exchange_n(&map[i], 0, __ATOMIC_ACQ_REL);
     total += __builtin_popcountl(word);
   }
-  return (uint16_t)total;
+  // Clamp: a fully-saturated 65536-bit map would otherwise wrap to 0 when
+  // narrowed to uint16_t.
+  return (uint16_t)(total > 0xFFFF ? 0xFFFF : total);
 }
 
 /** Weigh both bitmaps and publish the result to macs_wifi / macs_ble.
@@ -109,14 +111,21 @@ void weigh_buckets(bool peek) {
 }
 
 void reset_bucket() {
-  macs_wifi = 0;
-  macs_ble = 0;
+  // Clear the bitmaps first (discarding their popcount - reset means
+  // "back to zero", not "publish the current count"), then zero the
+  // counters last. Doing it in this order means that regardless of how
+  // a concurrent weigh_buckets() call (report task) interleaves with the
+  // word-by-word clearing below, the explicit assignment to 0 always
+  // happens after this bitmap is empty and so is never later overwritten
+  // by a stale non-zero count.
 #if defined(LIBPAX_WIFI)
   weigh_map(seen_ids_map_wifi, WORDS_PER_MAP, false);
 #endif
 #if defined(LIBPAX_BLE)
   weigh_map(seen_ids_map_ble, WORDS_PER_MAP, false);
 #endif
+  macs_wifi = 0;
+  macs_ble = 0;
 }
 
 int libpax_wifi_counter_count() { return macs_wifi; }
