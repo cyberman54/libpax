@@ -32,6 +32,7 @@ Which in turn is based of Łukasz Marcin Podkalicki's ESP32/016 WiFi Sniffer
 #include "globals.h"
 #include "libpax.h"
 #include "wifiscan.h"
+#include "esp_event.h"
 
 TimerHandle_t WifiChanTimer;
 volatile int initialized_wifi = 0;
@@ -116,6 +117,11 @@ void wifi_sniffer_init(uint16_t wifi_channel_switch_interval) {
   }
   ESP_ERROR_CHECK(ret);
 
+  // wifi driver posts events to the default event loop; may already exist
+  // (e.g. created by the Arduino framework or the application)
+  esp_err_t evt = esp_event_loop_create_default();
+  if (evt != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(evt);
+
   // initialize wifi driver with settings tuned for sniffing
   wifi_init_config_t wificfg = WIFI_INIT_CONFIG_DEFAULT();
   wificfg.nvs_enable = 0;          // we don't need any wifi settings from NVRAM
@@ -173,6 +179,10 @@ void wifi_sniffer_stop() {
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(&wifi_noop_sniffer));
     ESP_ERROR_CHECK(
         esp_wifi_set_promiscuous(false));  // now switch off monitor mode
+    // stop first so deinit can complete cleanly; the short delay lets the
+    // driver settle, otherwise deinit times out when stopping right after start
+    esp_wifi_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
     esp_wifi_deinit();
     // reset so the next start deterministically begins at the first
     // enabled channel, instead of resuming rotation where it left off
